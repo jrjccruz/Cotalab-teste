@@ -72,8 +72,8 @@ input[type=file]{display:none}
 <div class="voice-target"><span>AGUARDANDO MEDIÇÃO</span><strong id="voice-current">Crie uma cota</strong></div>
 <div style="margin:8px 0"><button id="authorize" type="button" style="width:100%;min-height:44px;background:#f5e8d9;color:#5e4632;border:1px solid #d5bda2">1. Solicitar permissão do microfone</button><div id="permission-status" style="font-size:12px;line-height:1.45;padding:8px 0">A permissão será solicitada pelo próprio Chrome quando disponível.</div></div><div class="voice-buttons"><button id="listen" class="mic-button">🎙 Falar medida</button><button id="confirm" class="accept" disabled>✓ Confirmar</button><button id="discard" disabled>Repetir</button></div>
 <div class="recognized" id="recognized" aria-live="polite"><span id="heard">A fala reconhecida aparecerá aqui.</span><strong id="candidate"></strong></div>
-<label class="toggle-row"><input type="checkbox" id="quick"> <span><strong>Preenchimento rápido</strong><small>Avança automaticamente após uma medida clara. Medidas ambíguas continuam pedindo confirmação.</small></span></label>
-<label class="toggle-row"><input type="checkbox" id="continuous"> <span><strong>Escuta em sequência (experimental)</strong><small>Tenta reconhecer várias medidas após um único toque. Pode ser interrompida pelo navegador, especialmente no celular.</small></span></label>
+<label class="toggle-row"><input type="checkbox" id="quick" checked> <span><strong>Preenchimento rápido</strong><small>Avança automaticamente após uma medida clara. Medidas ambíguas continuam pedindo confirmação.</small></span></label>
+<label class="toggle-row"><input type="checkbox" id="continuous" checked> <span><strong>Escuta em sequência (experimental)</strong><small>Após preencher uma cota, tenta continuar ouvindo a próxima. O Chrome pode interromper a sessão e exigir novo toque.</small></span></label>
 <div class="voice-manual"><label for="voice-sample">Teste a interpretação, mesmo sem microfone</label><div class="manual-row"><input type="text" id="voice-sample" inputmode="text" placeholder="Ex.: um metro e vinte e cinco"><button id="test-phrase">Testar</button></div></div>
 <div class="cotas-head"><strong>Cotas</strong><span>Toque numa linha para escolher onde medir</span></div><div class="voice-cotas" id="voice-cotas"></div>
 <p class="mic-help" id="mic-help">O reconhecimento real exige permissão de microfone e pode usar processamento online. Se o navegador não oferecer suporte, use o campo de teste.</p>
@@ -89,6 +89,7 @@ const create=$('#create'), edit=$('#edit'), remove=$('#remove'), undo=$('#undo')
 const help=$('#help'),counter=$('#counter'),modeTag=$('#mode'),photoState=$('#photostate');
 let W=360,H=480,lines=[],nextId=1,mode='create',selected=null,gesture=null,history=[],objectURL=null;
 let voiceTarget=null,draft=null,recognition=null,listening=false,micFault='',handledFinals=new Set();
+let sequenceRequested=false, stopRequested=false, sequenceRetries=0, restartTimer=null, speechHasResult=false;
 const voiceCurrent=$('#voice-current'),voiceState=$('#voice-state'),heard=$('#heard'),candidate=$('#candidate'),voiceList=$('#voice-cotas');
 const listenBtn=$('#listen'),confirmBtn=$('#confirm'),discardBtn=$('#discard'),quick=$('#quick'),continuous=$('#continuous');
 const supported=!!(window.SpeechRecognition||window.webkitSpeechRecognition);
@@ -166,14 +167,15 @@ function interpret(source){
  return {ok:true,cm,source:original,cota,assumed,reason};
 }
 function formatted(cm){return `${(cm*10).toLocaleString('pt-BR',{maximumFractionDigits:1})} mm`}
+function visualMeasure(cm){return (cm*10).toLocaleString('pt-BR',{maximumFractionDigits:1})}
 function waiting(){return lines.find(l=>l.measure_cm==null)?.id??null}
 function selectTarget(id){if(!lines.some(l=>l.id===id))return;voiceTarget=id;draft=null;paintVoice();render()}
 function paintVoice(){
  if(!lines.some(l=>l.id===voiceTarget))voiceTarget=waiting();
  voiceCurrent.textContent=voiceTarget!=null?'Cota '+voiceTarget:(lines.length?'Todas medidas':'Crie uma cota');
- voiceState.textContent=listening?'Ouvindo…':micFault?'Microfone indisponível':'Pronto';
+ voiceState.textContent=listening?'Ouvindo…':micFault?'Microfone indisponível':sequenceRequested?'Retomando…':'Pronto';
  voiceState.className='voice-pill'+(listening?' listening':micFault?' error':'');
- listenBtn.textContent=listening?'■ Parar':'🎙 Falar medida';listenBtn.classList.toggle('listening',listening);listenBtn.disabled=!supported||voiceTarget==null;
+ listenBtn.textContent=(listening||sequenceRequested)?'■ Parar':'🎙 Falar medida';listenBtn.classList.toggle('listening',listening);listenBtn.disabled=!supported||voiceTarget==null;
  confirmBtn.disabled=!draft?.ok;discardBtn.disabled=!draft;
  if(draft){heard.textContent=draft.ok?`Reconheci: “${draft.source}”${draft.reason?' · '+draft.reason:''}`:(draft.error||'Não compreendi a medida');candidate.textContent=draft.ok?formatted(draft.cm):'—';}
  else{heard.textContent=micFault||'Fale a medida da cota selecionada.';candidate.textContent='';}
@@ -183,7 +185,7 @@ function nextPending(current){return lines.find(l=>l.id>current&&l.measure_cm==n
 function accept(){if(!draft?.ok||voiceTarget==null)return;
  let dest=draft.cota??voiceTarget,l=lines.find(v=>v.id===dest);if(!l){note('A cota indicada não existe.');return}
  remember();l.measure_cm=draft.cm;l.last_recognized=draft.source;l.measure_source='voice';
- let old=dest;draft=null;voiceTarget=nextPending(old);paintVoice();render();note(`Cota ${old} preenchida: ${formatted(l.measure_cm)}. ${lines.every(l=>l.measure_cm!=null)?'Todas as cotas estão preenchidas.':'Próxima: cota '+voiceTarget+'.'}`);
+ let old=dest;draft=null;voiceTarget=nextPending(old);if(voiceTarget==null)sequenceRequested=false;paintVoice();render();note(`Cota ${old} preenchida: ${formatted(l.measure_cm)}. ${lines.every(l=>l.measure_cm!=null)?'Todas as cotas estão preenchidas.':'Próxima: cota '+voiceTarget+'.'}`);
 }
 function receiveSpoken(text){let p=interpret(text);
  if(draft?.ok&&listening&&continuous.checked&&!['confirm','repeat'].includes(p.command)){note('Há uma medida aguardando confirmação. Diga confirmar ou repetir.');return}
@@ -219,22 +221,52 @@ permissionButton.addEventListener('click',async()=>{
   permissionStatus.textContent=err?.name==='NotAllowedError'?'A autorização foi negada ou bloqueada pelo navegador. Confira permissões deste site no Chrome.':'Não foi possível acessar o microfone: '+(err?.name||'erro desconhecido')+'.';
  }
 });
-function startListening(){
- if(listening){try{recognition.stop()}catch(e){}return}
- if(!window.isSecureContext){micFault='Para usar voz, abra esta ferramenta em HTTPS (não em prévia local).';paintVoice();return}if(!supported){micFault='Reconhecimento de voz indisponível neste navegador.';paintVoice();return}
- if(!lines.length){note('Crie ao menos uma cota primeiro.');return}
+function clearRestart(){if(restartTimer!=null){clearTimeout(restartTimer);restartTimer=null}}
+function stopSequence(){stopRequested=true;sequenceRequested=false;clearRestart();if(recognition){try{recognition.stop()}catch(e){}}listening=false;paintVoice()}
+function launchRecognition(){
+ if(!sequenceRequested||stopRequested||voiceTarget==null)return;
  const R=window.SpeechRecognition||window.webkitSpeechRecognition;
- try{recognition=new R();recognition.lang='pt-BR';recognition.continuous=continuous.checked;recognition.interimResults=true;recognition.maxAlternatives=3;handledFinals=new Set();
-  recognition.onstart=()=>{listening=true;micFault='';paintVoice()};
-  recognition.onresult=e=>{for(let i=e.resultIndex;i<e.results.length;i++){
+ try{
+  const r=new R();recognition=r;r.lang='pt-BR';r.continuous=continuous.checked;r.interimResults=true;r.maxAlternatives=3;handledFinals=new Set();speechHasResult=false;
+  r.onstart=()=>{listening=true;micFault='';paintVoice();note('Microfone ativo. Aguardando medida para a cota '+voiceTarget+'.')};
+  r.onresult=e=>{for(let i=e.resultIndex;i<e.results.length;i++){
    const res=e.results[i],txt=res[0]?.transcript||'';
-   if(res.isFinal){if(!handledFinals.has(i)){handledFinals.add(i);receiveSpoken(txt)};continue}
-   else{heard.textContent='Ouvindo: '+txt;candidate.textContent='…'}
+   if(res.isFinal){if(!handledFinals.has(i)){handledFinals.add(i);speechHasResult=true;sequenceRetries=0;receiveSpoken(txt)};continue}
+   heard.textContent='Ouvindo: '+txt;candidate.textContent='…';
   }};
-  recognition.onerror=e=>{const m={'not-allowed':'O Chrome bloqueou a captura. Toque em Solicitar permissão; se a página é um arquivo local, teste em HTTPS.','no-speech':'Nenhuma fala detectada. Tente de novo.',network:'Falha de rede durante o reconhecimento.','audio-capture':'Nenhum microfone disponível.'};micFault=m[e.error]||('Erro de voz: '+e.error);note(micFault);paintVoice()};
-  recognition.onend=()=>{listening=false;paintVoice();if(continuous.checked&&!micFault)note('A escuta terminou. Caso haja mais cotas, toque em Falar medida novamente.')};recognition.start();
- }catch(e){listening=false;micFault='Não foi possível iniciar a escuta. Abra a página via HTTPS no navegador.';paintVoice()}
+  r.onerror=e=>{
+   const m={'not-allowed':'O Chrome bloqueou a captura. Verifique a permissão de microfone do site.','service-not-allowed':'O serviço de reconhecimento de voz não foi autorizado.','no-speech':'Nenhuma fala detectada.','network':'Falha de rede durante o reconhecimento.','audio-capture':'Nenhum microfone disponível.','aborted':'Escuta interrompida.'};
+   if(e.error==='no-speech'){note('Nenhuma fala detectada. Tentarei ouvir novamente.');return}
+   if(e.error==='aborted'&&stopRequested)return;
+   micFault=m[e.error]||('Erro de voz: '+e.error);
+   if(e.error!=='aborted'){sequenceRequested=false;stopRequested=true;clearRestart()}
+   note(micFault);paintVoice();
+  };
+  r.onend=()=>{
+   if(recognition!==r)return;
+   listening=false;paintVoice();
+   if(!continuous.checked||!sequenceRequested||stopRequested||voiceTarget==null){
+    if(voiceTarget==null)note('Todas as cotas foram preenchidas.');
+    else if(!stopRequested)note('Escuta encerrada. Toque em Falar medida para continuar.');
+    return;
+   }
+   if(draft?.ok&&!quick.checked){note('Confirme a medida antes de prosseguir. Depois toque em Falar medida.');sequenceRequested=false;return}
+   if(sequenceRetries>=3){sequenceRequested=false;note('O Chrome interrompeu a escuta em sequência. Toque em Falar medida para retomar a próxima cota.');return}
+   sequenceRetries++;note('Passando para a cota '+voiceTarget+'… tentando reativar o microfone.');
+   clearRestart();restartTimer=setTimeout(()=>{restartTimer=null;launchRecognition()},420);
+  };
+  r.start();
+ }catch(e){listening=false;sequenceRequested=false;stopRequested=true;micFault='O Chrome não permitiu continuar automaticamente. Toque em Falar medida para iniciar outra sessão.';note(micFault);paintVoice()}
 }
+function startListening(){
+ if(listening||sequenceRequested){stopSequence();note('Escuta interrompida pelo usuário.');return}
+ if(!window.isSecureContext){micFault='Abra esta página em HTTPS para ativar o microfone.';paintVoice();return}
+ if(!supported){micFault='Reconhecimento de voz indisponível neste navegador.';paintVoice();return}
+ if(!lines.length){note('Crie ao menos uma cota primeiro.');return}
+ if(voiceTarget==null){note('Todas as cotas estão preenchidas. Selecione uma cota para corrigir.');return}
+ clearRestart();micFault='';stopRequested=false;sequenceRequested=true;sequenceRetries=0;launchRecognition();
+}
+
 window.CotaLabTest={interpret,quantity,receiveSpoken,readLines:()=>JSON.parse(JSON.stringify(lines))};
 
 const clamp=(v,min,max)=>Math.max(min,Math.min(max,v));
@@ -254,7 +286,7 @@ function render(){
     if(a>90)a-=180;if(a<=-90)a+=180;
     const x=(l.x1+l.x2)/2,y=(l.y1+l.y2)/2;
     const start=`${svgstr(l.x1)} ${svgstr(l.y1)}`,end=`${svgstr(l.x2)} ${svgstr(l.y2)}`;
-    const labelText=l.measure_cm!=null?`${l.id} · ${formatted(l.measure_cm)}`:String(l.id);
+    const labelText=l.measure_cm!=null?visualMeasure(l.measure_cm):String(l.id);
     const labelSide=l.labelSide||1;
     const textY=-8*u*labelSide;
     const hitWidth=Math.max(24*u,labelText.length*7*u);
